@@ -58,15 +58,19 @@ Untuk tiap game, peringkatnya selama 72 jam dimodelkan sebagai **difusi
 Gaussian dengan drift** (tanpa Monte Carlo — analitik, jadi dua run
 selalu byte-identik):
 
-1. **Drift** (perubahan peringkat per jam): kombinasi momentum peringkat
-   24 jam terakhir (bobot 0,6) dan kecepatan pertumbuhan pemain 24 jam
-   (bobot 0,4) yang dipetakan lewat **regresi growth→rank-velocity yang
-   difit dari history itu sendiri**, ditambah momentum genre yang sama
-   (bobot 0,15) dan dorongan kecil untuk game yang di-`update` dalam
-   48 jam terakhir (terlihat dari `details.updated`). Drift dijepit
-   ±0,4 peringkat/jam dan meluruh eksponensial (tau 36 jam).
+1. **Drift** (perubahan peringkat per jam): kombinasi kecepatan
+   pertumbuhan pemain 24 jam (bobot 0,6 — chart mengurutkan dari
+   kecepatan pertumbuhan, bukan ukuran) dan momentum peringkat 24 jam
+   terakhir (bobot 0,4) yang dipetakan lewat **regresi
+   growth→rank-velocity yang difit dari history itu sendiri**, ditambah
+   momentum genre yang sama (bobot 0,15) dan dorongan kecil untuk game
+   yang di-`update` dalam 48 jam terakhir (terlihat dari
+   `details.updated`). Drift dijepit ±0,4 peringkat/jam dan meluruh
+   eksponensial (tau 36 jam).
 2. **Difusi**: sigma per game dari varians perubahan peringkat per jam
-   game itu, di-shrink ke varians gabungan semua game; sigma tumbuh
+   game itu, di-shrink ke varians gabungan semua game, lalu dikali 0,5
+   (varians mentah terlalu menyebar — backtest membuktikan 0,5 lebih
+   baik dari 1,0 di data sintetis maupun history asli); sigma tumbuh
    akar-waktu, dijepit maks 9 peringkat. Rata-rata peringkat juga
    ditarik pelan (0,01/jam) ke peringkat ekuilibrium dari skor kekuatan
    (log playing, pertumbuhan 24 jam, stabilitas top-10).
@@ -79,8 +83,8 @@ selalu byte-identik):
    (k±0,5), dikali survival; **rata-rata atas 72 jam** itulah
    probabilitas akhirnya (satu forecast dinilai di semua jam, jadi
    rata-rata waktu adalah distribusi yang benar).
-5. Per tempat, hanya game dengan p ≥ 0,002 yang dinamai (di bawah itu,
-   bagian unnamed — sekitar 0,002/game — memberi skor lebih baik bila
+5. Per tempat, hanya game dengan p ≥ 0,006 yang dinamai (di bawah itu,
+   bagian unnamed — sekitar 0,005/game — memberi skor lebih baik bila
    game itu ternyata muncul), maks 40 baris per tempat; total per tempat
    dijepit 0,85 sehingga ≥0,15 tetap unnamed sebagai lindung nilai untuk
    game yang baru meluncur selama jendela. `top10` diurutkan menurut
@@ -106,8 +110,10 @@ baru; 81 history reads + 72 future reads sebagai kebenaran).
 |---|---|
 | Runtime (history sintetis 81 reads, 97 game) | **0,35 detik** (batas 300 dtk) |
 | Determinisme | 2 run → **byte-identik** |
-| Validasi skema (`tests/validate.py`) | **VALID**: 287 baris, 10 tempat, jumlah per tempat 0,61–0,79 (≤ 1), top10 10 id berbeda, 14.776 byte |
-| Backtest log score vs baseline (aturan resmi, `tests/score.py`) | **forecast −38,04** vs baseline −47,41 → **+9,37 nats** (typical p 0,022 vs 0,009) |
+| Validasi skema (`tests/validate.py`) | **VALID**: 247 baris, 10 tempat, jumlah per tempat 0,64–0,79 (≤ 1), top10 10 id berbeda, 12.750 byte |
+| Backtest log score vs baseline, sintetis seed 42 (aturan resmi, `tests/score.py`) | **forecast −37,50** vs baseline −47,41 → **+9,91 nats** (typical p 0,024 vs 0,009) — ronde 2: −38,04 (+9,37) |
+| Backtest log score, sintetis seed 7 (dunia beda, anti-overfit) | **forecast −41,75** vs baseline −55,28 → **+13,54 nats** — ronde 2: −41,84 (+13,45) |
+| Backtest log score, history asli kit (rolling 15 cutoff, 131 reads) | **forecast −38,71** — ronde 2: −39,12 (+0,41) |
 | History kosong | exit 0, menulis `{"probabilities":[],"top10":[]}` + peringatan stderr |
 | History minimal (3 reads) | exit 0, output VALID (265 baris) |
 | Tanpa `task.json` | exit 0, fallback jendela = read terakhir, output identik |
@@ -119,6 +125,28 @@ ini kena floor −9,21 setiap kali chart bergerak. Backtest sintetis
 membuktikan algoritma mengalahkan baseline di data yang belum dilihat;
 angka absolutnya tidak bisa dibandingkan langsung dengan papan
 practice (dunia sintetis ≠ chart asli).
+
+## Revisi ronde 3 (12 Nov 2026) — perbaikan metodologi
+
+Tiga perubahan, semuanya dipilih karena memperbaiki log score di
+KETIGA backtest (sintetis seed 42, sintetis seed 7, history asli kit):
+(1) drift kini didominasi pertumbuhan (bobot 0,6) atas momentum
+peringkat (0,4) — chart mengurutkan dari kecepatan pertumbuhan, dan
+momentum adalah proksi yang tertinggal; (2) ambang penamaan naik
+0,002 → 0,006 — game yang dinamai di bawah ~0,005 mendapat skor
+lebih buruk daripada dibiarkan unnamed (bagian unnamed dibagi rata
+ke game di chart, ~0,005 each); (3) sigma difusi dikali 0,5 —
+varians perubahan peringkat mentah terlalu menyebar.
+
+Yang dicoba dan DITOLAK karena tidak memperbaiki ketiga backtest:
+sinyal akselerasi pertumbuhan (terlalu berisik — memperburuk semua);
+blend pertumbuhan 12 jam (membantu sintetis, memperburuk history
+asli); bobot ekuilibrium yang didominasi pertumbuhan (membantu history
+asli, memperburuk sintetis); normalisasi total per tempat ke 0,85
+(terlalu percaya diri — memperburuk seed 7 dan history asli).
+Oracle (frekuensi masa depan yang sebenarnya) ada di −25,89 /
+−27,18, jadi masih ada jarak — tetapi sebagian besar jarak itu
+adalah ketidakpastian yang melekat, bukan kesalahan model.
 
 ## Status kit & asumsi yang belum terverifikasi
 

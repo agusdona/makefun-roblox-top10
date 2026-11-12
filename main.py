@@ -14,17 +14,21 @@ Writes $MAKEFUN_OUTPUT_DIR (default /output)/forecast.json:
 Method (stdlib only, no network, fully deterministic):
   For every game seen in the history, model its rank over the 72-hour
   scored window as a Gaussian diffusion with drift:
-    * drift comes from recent rank momentum and 24h player-growth
-      velocity (the chart ranks by growth velocity, not size), mapped
-      through a growth->rank-velocity regression fitted on the history
-      itself, plus a same-genre momentum term and a small boost for
-      games updated in the last 48h (update bumps are visible in the
-      data via details.updated);
+    * drift comes from 24h player-growth velocity first (weight 0.6:
+      the chart ranks by growth velocity, not size) and recent rank
+      momentum second (weight 0.4), the growth mapped through a
+      growth->rank-velocity regression fitted on the history itself,
+      plus a same-genre momentum term and a small boost for games
+      updated in the last 48h (update bumps are visible in the data
+      via details.updated);
     * drift decays exponentially (momentum half-life ~25h) and the mean
       rank reverts mildly toward an equilibrium rank implied by a
       strength score (log playing, 24h growth, top-10 stability);
     * diffusion sigma comes from the game's own hourly rank-change
-      variance, shrunk toward the pooled variance across all games;
+      variance, shrunk toward the pooled variance across all games,
+      then halved: the raw rank-change variance over-disperses the
+      place probabilities (verified on synthetic backtests and on the
+      real kit history);
     * a game ages out 28 days after its chart debut (first seen in the
       history; when it was already charting in the first read, the
       creation date is the debut proxy): survival follows a logistic
@@ -32,10 +36,12 @@ Method (stdlib only, no network, fully deterministic):
       its pre-exit probability mass.
   The place distribution of a game is the average over the 72 hours of
   its hourly Gaussian place probabilities.  Per place, games are named
-  only when their probability clears the unnamed-share level, and each
-  place's named total is capped so >=15% stays unnamed: the scorer
-  spreads the unnamed share over every game on the future read's chart,
-  which is the only hedge for games that launch during the window.
+  only when their probability clears 0.006: a game named below that
+  scores worse than left unnamed, because the scorer spreads the
+  unnamed share over every game on the future read's chart (~0.005
+  each).  Each place's named total is capped so >=15% stays unnamed:
+  that unnamed share is the only hedge for games that launch during
+  the window.
   top10 is ordered by expected place.
 
 Calibration (from the research in ../prediction.md, not from hardcoding
@@ -69,7 +75,10 @@ WINDOW_HOURS = 72
 # --- calibration constants (see module docstring) -------------------------
 AGE_OUT_DAYS = 28            # chart eligibility window, from chart debut
 AGE_OUT_SCALE_H = 6.0        # logistic scale (hours) around the age-out hour
-KEEP_MIN_P = 0.002           # only name a game at a place above this p
+KEEP_MIN_P = 0.006          # only name a game at a place above this p
+                             # (a game named below ~0.005 scores worse than
+                             # left unnamed: the unnamed share is spread
+                             # over the chart's games, ~0.005 each)
 PLACE_SUM_CAP = 0.85         # cap named total per place; >=0.15 stays unnamed
 MAX_ROWS_PER_PLACE = 40
 DRIFT_CAP = 0.4              # ranks/hour, sustained drift clamp
@@ -77,12 +86,17 @@ DRIFT_TAU_H = 36.0           # exponential decay of momentum (hours)
 REVERT_RATE = 0.01           # per-hour pull toward equilibrium rank
 SIGMA_CAP = 9.0              # ranks, diffusion cap
 SIGMA_FLOOR = 0.5            # ranks/hour, per-game sigma floor
+SIGMA_SCALE = 0.5            # shrink factor on the per-game rank sigma:
+                             # the raw hourly rank-change variance
+                             # over-disperses the place probabilities
+                             # (backtest: 0.5 beats 1.0 on synthetic and
+                             # on the real kit history)
 UPDATE_BOOST_MAX = 0.06      # ranks/hour extra climb for a fresh update
 UPDATE_DECAY_H = 48.0        # decay of the update boost (hours)
 UPDATE_WINDOW_H = 72.0       # only updates this recent count
 GENRE_WEIGHT = 0.15          # weight of same-genre momentum in drift
-MOMENTUM_WEIGHT = 0.6        # weight of rank momentum in drift
-GROWTH_WEIGHT = 0.4          # weight of growth-velocity drift
+MOMENTUM_WEIGHT = 0.4        # weight of rank momentum in drift
+GROWTH_WEIGHT = 0.6          # weight of growth-velocity drift
 DEFAULT_SLOPE = -20.0        # growth->rank-velocity slope fallback
 DEFAULT_SIGMA = 2.0          # pooled sigma fallback (ranks/sqrt(hour))
 
@@ -331,12 +345,12 @@ def game_sigma(entry, pooled):
         if 0 < dt <= 24:
             diffs.append((r2 - r1) / math.sqrt(dt))
     if len(diffs) < 5:
-        return pooled
+        return pooled * SIGMA_SCALE
     mean = sum(diffs) / len(diffs)
     var = sum((d - mean) ** 2 for d in diffs) / len(diffs)
     n = float(len(diffs))
     shrunk = math.sqrt((n * var + 5.0 * pooled * pooled) / (n + 5.0))
-    return clamp(shrunk, SIGMA_FLOOR, 4.0)
+    return clamp(shrunk * SIGMA_SCALE, SIGMA_FLOOR, 4.0)
 
 
 # --- per-game forecast ---------------------------------------------------------
