@@ -1,75 +1,90 @@
-# Roblox Up-and-Coming Top-10 Forecast — round 4
+# Roblox Up-and-Coming top-10 forecast — round 5
 
-Entry for the make.fun competition `roblox-up-and-coming-forecast-01`
-($500, closes 13 Nov 2026 13:00 WIB). The program reads the chart
-history and forecasts which games will occupy the top 10 places of
-Roblox's Up-and-Coming chart over the next 72 hours.
+Forecast for `roblox-up-and-coming-forecast-01`: the Up-and-Coming chart's
+top 10 at every hour of the 72 hours after entries close. The program
+(`python3 /bot/main.py`, Python 3.13, standard library only) reads
+`/input/history.ndjson` + `task.json` and writes one file,
+`/output/forecast.json`, with a probability for each game named at each
+of the 10 places plus the top 10 in order.
 
-## Method
+## Method: persistence + per-game Gaussian rank diffusion
 
-The chart itself ranks games by their 24-hour growth velocity, so the
-forecast is built on that same signal, measured from the player-count
-history:
+The chart ranks games by 24h player-growth velocity, and over a 72h
+window the best point forecast of a game's rank is its rank now. Every
+directional signal tried — 24h-velocity drift (both directions),
+rank momentum, age drift, a uniform downward drift — made the backtest
+worse on both synthetic seeds, so **no drift is applied at all**. The
+chart is a revolving door whose direction cannot be called from
+velocity; the current rank is the best estimate of the future rank.
 
-1. **Growth.** For every game on the last chart, the 24-hour
-   log-velocity of its player count: `ln(playing now / playing ~24h
-   ago)`, scaled to a 24h window. Games with a shorter history use
-   what they have, scaled the same way. This is the signal the chart
-   moves on, and a game's velocity level persists well over the 72h
-   window.
-2. **Momentum.** The acceleration — recent 12h log-velocity minus
-   older 12h log-velocity — is computed for every game, but its
-   weight is **0.0**. On the synthetic backtests it is
-   anti-predictive: fast games that are slightly decelerating stay
-   on the chart for days, while low-base games with high
-   acceleration never climb into the top 10. Weighting it at 0.4
-   costs ~1.7–2.2 nats versus weight 0.0 on both seeds tested. The
-   signals are combined raw, not z-normalised: z-scoring would
-   inflate momentum until it demotes the persistent leaders.
-3. **Expected order.** Games are ranked by `score = 1.0 * growth`.
-   The top 10 of that order is the forecast's `top10`.
-4. **Diffusion.** Each game's mass is spread over places 1–10 with
-   a Gaussian in rank space centred on its expected rank, sigma
-   6.0. The spread is deliberately **wide**: in the backtest, ~39%
-   of future top-10 slots are filled by games ranked 11th or lower
-   at the last read, so a narrow spread (sigma ~1.5) gives those
-   climbers ~zero probability and the forecast barely beats
-   persistence. The wide spread is what carries the gain over the
-   house baseline. Each place is normalised to 0.7 named mass; rows
-   below 0.006 are dropped. The remaining 0.3 per place is shared
-   by the games not named there, which covers climbers from far down
-   the chart and games that debut during the window.
+What does improve the score is honest, per-game uncertainty. A game's
+future rank is a Gaussian around its current rank. Its width follows
+that game's own rank volatility (mean absolute rank change between
+consecutive reads), shrunk halfway toward the pooled median volatility
+so a noisy estimate cannot dominate:
 
-## Running it
+- volatile game (frequent mover) -> wide spread, hedged probabilities
+- stable game -> tight spread, confident probabilities
 
-Python 3, standard library only, no network. Deterministic: two
-runs on the same input produce byte-identical output.
+Each place's probabilities are scaled to sum to `MASS_PER_PLACE`, and a
+game is only named at a place when its probability reaches
+`KEEP_MIN_P`: below ~0.005 a name scores worse than leaving the game
+unnamed (the unnamed share is spread over the chart, ~0.005 per game).
+
+## Parameters (tuned, see below)
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `SIGMA_BASE` | 7.5 | base rank-diffusion width, in places |
+| `SIGMA_SHRINK` | 0.5 | blend of per-game volatility vs pooled median |
+| `MASS_PER_PLACE` | 0.70 | total named probability per place |
+| `KEEP_MIN_P` | 0.006 | minimum probability to name a game at a place |
+| `VOL_CAP` | 3.0 | cap on the per-game / pooled volatility ratio |
+
+## Backtest results (log score, higher is better)
+
+Synthetic worlds (the kit's generator, 72h future, 72 reads). Round 5
+beats round 4 on **all six seeds**:
+
+| Seed | Round 4 | Round 5 | Delta | Delta vs house |
+|---|---|---|---|---|
+| 42 | -36.8256 | -36.8033 | +0.022 | +10.61 |
+| 7 | -42.6694 | -42.4771 | +0.192 | +12.80 |
+| 123 | -38.4385 | -38.4256 | +0.013 | +8.55 |
+| 1 | -38.613 | -38.1963 | +0.417 | +9.56 |
+| 99 | -40.920 | -40.8410 | +0.079 | +8.40 |
+| 2026 | -37.813 | -37.7673 | +0.046 | +10.82 |
+| **mean** | **-39.213** | **-39.085** | **+0.128** | — |
+
+Caveat, stated honestly: on the sparse real-history rolling backtest
+(31 cutoffs, 72h horizon, 295 reads) round 5 scores -36.87 against
+round 4's -36.78 (-0.09). The real practice history is sparse (34 reads,
+one every 4-11h); the per-game volatility estimate needs dense reads to
+be reliable, and it degrades when the history is thinned (verified by
+subsampling the synthetic histories). The final's history is dense
+(hourly house-recorder reads), like the synthetic sets where round 5
+wins 6/6, so the synthetic evidence is the applicable one here — but
+the real-history number is reported, not hidden.
+
+## What was tried and rejected
+
+- 24h-velocity drift, either sign (positive: -10 nats; negative: worse)
+- Rank momentum, any weight
+- Age drift (young up / old down) and uniform downward drift
+- Larger uniform sigma (7-12) or mass (0.75-0.80) without per-game
+  scaling: helps some seeds, hurts others; no uniform pair beats
+  round 4 on both seeds 42 and 7
+- Per-game sigma with full weight (shrink 1.0) or no weight (shrink 0):
+  both worse; the 50/50 shrink is the optimum
+
+## Run it
 
 ```sh
-MAKEFUN_INPUT_DIR=/input MAKEFUN_OUTPUT_DIR=/output python3 main.py
+mkdir -p out
+MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
+python3 tests/validate.py out/forecast.json
 ```
 
-Or pass the directories as positional arguments:
-
-```sh
-python3 main.py <input_dir> <output_dir>
-```
-
-Reads `<input_dir>/history.ndjson`, writes
-`<output_dir>/forecast.json` with exactly two keys:
-`probabilities` (rows of `{universe_id, place, p}`) and `top10`
-(10 distinct universe ids, best first).
-
-## Backtest results (synthetic, kit `tests/score.py`)
-
-| dataset | log score | house baseline | delta |
-|---|---|---|---|
-| seed 42 | **-36.825** | -47.411 | **+10.59 nats** |
-| seed 7  | **-42.672** | -55.281 | **+12.61 nats** |
-
-Round 3 scored -37.50 / +9.91 nats on seed 42; round 4 beats it
-by ~0.68 nats. Output is deterministic (two runs byte-identical)
-and passes `tests/validate.py` (179 rows, 10 places named,
-per-place sums ~0.685). Also verified on the real kit input
-(`VALID`) and on the `min_in` / `notask_in` / `empty_in` fixtures
-(no crash; empty history yields an empty forecast).
+Deterministic: two runs on the same input produce byte-identical
+output (no randomness, no dict-order dependence). Standard library
+only, no network, well inside the 300s limit.
